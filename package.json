@@ -2,6 +2,7 @@
   "name": "discount-engine",
   "version": "1.0.0",
   "description": "Opptra FDE Intern Assignment \u2014 Discount Engine",
+  "author": "Ranjith Singh (https://github.com/Ranjithsingh2004)",
   "type": "module",
   "scripts": {
     "dev": "vite",
