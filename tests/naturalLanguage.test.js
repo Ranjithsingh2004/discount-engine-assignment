@@ -173,6 +173,20 @@ describe('handleParseRule (server)', () => {
     expect(request.messages[0].content).toBe(buildUserMessage('10% off flipkart', ['Natura Casa'], ['Flipkart']))
   })
 
+  it('retries on the stable endpoint if the beta request is rejected', async () => {
+    const { default: Anthropic } = await import('@anthropic-ai/sdk')
+    const parsed = ok({ scope: 'cart', applies_to: null, type: 'flat', value: 200, stackable: false, min_cart_value: 3000 })
+    const client = {
+      beta: { messages: { parse: vi.fn().mockRejectedValue(new Anthropic.BadRequestError(400, {}, 'unknown beta', new Headers())) } },
+      messages: { parse: vi.fn().mockResolvedValue({ stop_reason: 'end_turn', parsed_output: parsed, model: 'claude-opus-5-5' }) },
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const out = await handleParseRule({ text: 'Rs.200 off carts over 3000' }, {}, { client })
+    warn.mockRestore()
+    expect(out.status).toBe(200)
+    expect(client.messages.parse.mock.calls[0][0]).not.toHaveProperty('fallbacks')
+  })
+
   it('maps a refusal and an unparseable response to errors, not crashes', async () => {
     expect((await handleParseRule({ text: 'abc' }, {}, { client: fakeClient({ stop_reason: 'refusal', parsed_output: null }) })).status).toBe(422)
     expect((await handleParseRule({ text: 'abc' }, {}, { client: fakeClient({ stop_reason: 'end_turn', parsed_output: null }) })).status).toBe(502)

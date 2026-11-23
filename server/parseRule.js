@@ -13,6 +13,7 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod'
+import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
 import { z } from 'zod'
 
 export const DEFAULT_MODEL = 'claude-opus-5-5'
@@ -93,24 +94,38 @@ export async function handleParseRule(payload, env, deps = {}) {
   const client = deps.client ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 25_000, maxRetries: 1 })
   const model = env.ANTHROPIC_MODEL || DEFAULT_MODEL
 
+  const request = {
+    model,
+    max_tokens: 16000,
+    system: SYSTEM_PROMPT,
+    messages: [{ role: 'user', content: buildUserMessage(text, cleanNames(payload.brands), cleanNames(payload.platforms)) }],
+  }
+
   let response
   try {
-    response = await client.beta.messages.parse({
-      model,
-      max_tokens: 16000,
-      // Re-run on Anthropic's recommended fallback model if a safety classifier declines.
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
-      output_config: {
-        effort: 'low', // short extraction task; low effort keeps latency down
-        format: betaZodOutputFormat(RuleParseSchema),
-      },
-      system: SYSTEM_PROMPT,
-      messages: [
-        { role: 'user', content: buildUserMessage(text, cleanNames(payload.brands), cleanNames(payload.platforms)) },
-      ],
-    })
+    try {
+      response = await client.beta.messages.parse({
+        ...request,
+        // Re-run on Anthropic's recommended fallback model if a safety classifier declines.
+        betas: ['server-side-fallback-2026-07-01'],
+        fallbacks: 'default',
+        output_config: {
+          effort: 'low', // short extraction task; low effort keeps latency down
+          format: betaZodOutputFormat(RuleParseSchema),
+        },
+      })
+    } catch (error) {
+      if (!(error instanceof Anthropic.BadRequestError)) throw error
+      // An account or model that rejects the fallback beta should still get a parse:
+      // retry once on the stable endpoint with the same schema.
+      console.warn(`[parse-rule] beta request rejected (${error.message}); retrying without fallbacks`)
+      response = await client.messages.parse({
+        ...request,
+        output_config: { effort: 'low', format: zodOutputFormat(RuleParseSchema) },
+      })
+    }
   } catch (error) {
+    console.error('[parse-rule] model call failed:', error?.status ?? '', error?.message)
     if (error instanceof Anthropic.AuthenticationError) {
       return fail(502, 'llm_auth', 'The AI service rejected this deployment’s API key.')
     }

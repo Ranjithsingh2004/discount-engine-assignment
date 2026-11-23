@@ -18,7 +18,7 @@ npm run dev               # http://localhost:5173
 
 | Command | What it does |
 |---|---|
-| `npm test` | 75 unit tests: engine, validation, CSV, PDF parsing, LLM output handling |
+| `npm test` | 76 unit tests: engine, validation, CSV, PDF parsing, LLM output handling |
 | `npm run eval:rules` | Live check of the rule parser against Claude (11 phrasings, needs a key, costs cents) |
 | `npm run samples` | Regenerates the sample PDFs in `sample-data/` |
 | `npm run build` | Production build to `dist/` |
