@@ -1,20 +1,31 @@
 {
   "name": "discount-engine",
   "version": "1.0.0",
-  "description": "Opptra FDE Intern Assignment — Discount Engine",
+  "description": "Opptra FDE Intern Assignment \u2014 Discount Engine",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "samples": "node scripts/make-sample-pdfs.mjs",
+    "eval:rules": "node scripts/eval-rule-parser.mjs"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
     "papaparse": "^5.4.1",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",
-    "vite": "^5.0.0"
+    "pdf-lib": "^1.17.1",
+    "vite": "^5.0.0",
+    "vitest": "^2.1.9"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
