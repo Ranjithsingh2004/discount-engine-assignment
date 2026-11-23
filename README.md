@@ -2,7 +2,7 @@
 
 A customer-facing cart pricing engine: final price per item, a plain-language reason for every price, a cart-level offer, natural-language rule input (Gemini) and PDF cart upload.
 
-**Live demo:** _LIVE_URL_ — click **Load sample data** to see the expected results instantly.
+**Live demo:** https://opptra-discount-engine-ranjith.vercel.app — click **Load sample data** to see the expected results instantly.
 
 ---
 
