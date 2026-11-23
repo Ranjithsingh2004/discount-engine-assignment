@@ -1,7 +1,7 @@
 {
   "name": "discount-engine",
   "version": "1.0.0",
-  "description": "Opptra FDE Intern Assignment \u2014 Discount Engine",
+  "description": "Opptra FDE Intern Assignment — Discount Engine",
   "author": "Ranjith Singh (https://github.com/Ranjithsingh2004)",
   "type": "module",
   "scripts": {
@@ -13,7 +13,6 @@
     "eval:rules": "node scripts/eval-rule-parser.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^1.12.0",
     "papaparse": "^5.4.1",
     "pdfjs-dist": "^4.10.38",
     "react": "^18.2.0",

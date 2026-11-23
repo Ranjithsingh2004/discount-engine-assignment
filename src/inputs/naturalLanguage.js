@@ -1,7 +1,7 @@
 /**
  * naturalLanguage.js — natural-language rule input adapter (browser side)
  *
- * Flow:  text ──► POST /api/parse-rule (Claude, structured output)
+ * Flow:  text ──► POST /api/parse-rule (LLM, structured output)
  *             ──► interpretRuleParse(): validate with normalizeRule(), add warnings
  *             ──► confirmation card in the UI ──► user confirms ──► rule list
  *

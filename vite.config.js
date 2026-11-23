@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 /**
  * Serves POST /api/parse-rule from `npm run dev` and `npm run preview`, using
  * the same handler as the Vercel function, so local development needs no
- * extra tooling: put ANTHROPIC_API_KEY in .env and run the usual commands.
+ * extra tooling: put GEMINI_API_KEY in .env and run the usual commands.
  */
 function localApi(env) {
   const mount = (middlewares) => {

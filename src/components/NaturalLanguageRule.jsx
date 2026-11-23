@@ -103,7 +103,7 @@ export default function NaturalLanguageRule({ rules, cartItems, onConfirm }) {
         ))}
       </div>
 
-      {state.phase === 'loading' && <div style={{ ...S.hint, marginTop: 10 }}>Reading your rule with Claude…</div>}
+      {state.phase === 'loading' && <div style={{ ...S.hint, marginTop: 10 }}>Reading your rule with AI…</div>}
 
       {state.phase === 'done' && state.kind === 'ready' && (
         <ConfirmCard

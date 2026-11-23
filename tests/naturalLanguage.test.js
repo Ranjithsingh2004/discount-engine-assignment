@@ -151,11 +151,18 @@ describe('requestRuleParse', () => {
 })
 
 describe('handleParseRule (server)', () => {
-  const fakeClient = (response) => ({ beta: { messages: { parse: vi.fn().mockResolvedValue(response) } } })
+  const reply = (status, body) => vi.fn().mockResolvedValue({ ok: status < 400, status, json: async () => body })
+  const completion = (content, extra = {}) =>
+    reply(200, { model: 'gemini-3.5-flash-lite', choices: [{ finish_reason: 'stop', message: { content: typeof content === 'string' ? content : JSON.stringify(content) }, ...extra }] })
+  const env = { GEMINI_API_KEY: 'test-key' }
+  const flipkart = ok({ scope: 'platform', applies_to: 'Flipkart', type: 'percentage', value: 10, stackable: false, min_cart_value: null })
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {})
 
   it('validates input length before calling the model', async () => {
-    expect((await handleParseRule({ text: ' ' }, {})).status).toBe(400)
-    expect((await handleParseRule({ text: 'x'.repeat(301) }, {})).status).toBe(400)
+    const fetch = vi.fn()
+    expect((await handleParseRule({ text: ' ' }, env, { fetch })).status).toBe(400)
+    expect((await handleParseRule({ text: 'x'.repeat(301) }, env, { fetch })).status).toBe(400)
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('reports a missing API key clearly', async () => {
@@ -163,34 +170,50 @@ describe('handleParseRule (server)', () => {
     expect(out).toMatchObject({ status: 503, body: { error: 'llm_not_configured' } })
   })
 
-  it('returns the parsed output and sends known names to the model', async () => {
-    const parsed = ok({ scope: 'platform', applies_to: 'Flipkart', type: 'percentage', value: 10, stackable: false, min_cart_value: null })
-    const client = fakeClient({ stop_reason: 'end_turn', parsed_output: parsed, model: 'claude-opus-5-5' })
-    const out = await handleParseRule({ text: '10% off flipkart', brands: ['Natura Casa'], platforms: ['Flipkart', 'Flipkart'] }, {}, { client })
-    expect(out).toEqual({ status: 200, body: { result: parsed, model: 'claude-opus-5-5' } })
-    const request = client.beta.messages.parse.mock.calls[0][0]
-    expect(request.model).toBe('claude-opus-5-5')
-    expect(request.messages[0].content).toBe(buildUserMessage('10% off flipkart', ['Natura Casa'], ['Flipkart']))
+  it('calls Gemini with a JSON schema and returns the parsed result', async () => {
+    const fetch = completion(flipkart)
+    const out = await handleParseRule({ text: '10% off flipkart', brands: ['Natura Casa'], platforms: ['Flipkart', 'Flipkart'] }, env, { fetch })
+    expect(out).toEqual({ status: 200, body: { result: flipkart, model: 'gemini-3.5-flash-lite' } })
+
+    const [url, init] = fetch.mock.calls[0]
+    expect(url).toBe('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
+    expect(init.headers.Authorization).toBe('Bearer test-key')
+    const request = JSON.parse(init.body)
+    expect(request.model).toBe('gemini-3.5-flash-lite')
+    expect(request.response_format.type).toBe('json_schema')
+    expect(request.response_format.json_schema.schema.required).toEqual(['status', 'rule', 'missing', 'assumptions', 'message'])
+    expect(request.messages[1].content).toBe(buildUserMessage('10% off flipkart', ['Natura Casa'], ['Flipkart']))
   })
 
-  it('retries on the stable endpoint if the beta request is rejected', async () => {
-    const { default: Anthropic } = await import('@anthropic-ai/sdk')
-    const parsed = ok({ scope: 'cart', applies_to: null, type: 'flat', value: 200, stackable: false, min_cart_value: 3000 })
-    const client = {
-      beta: { messages: { parse: vi.fn().mockRejectedValue(new Anthropic.BadRequestError(400, {}, 'unknown beta', new Headers())) } },
-      messages: { parse: vi.fn().mockResolvedValue({ stop_reason: 'end_turn', parsed_output: parsed, model: 'claude-opus-5-5' }) },
-    }
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const out = await handleParseRule({ text: 'Rs.200 off carts over 3000' }, {}, { client })
-    warn.mockRestore()
-    expect(out.status).toBe(200)
-    expect(client.messages.parse.mock.calls[0][0]).not.toHaveProperty('fallbacks')
+  it('can point at another OpenAI-compatible provider through env vars', async () => {
+    const fetch = completion(flipkart)
+    await handleParseRule({ text: '10% off flipkart' }, { LLM_API_KEY: 'k', LLM_BASE_URL: 'https://example.test/v1/', LLM_MODEL: 'some-model' }, { fetch })
+    expect(fetch.mock.calls[0][0]).toBe('https://example.test/v1/chat/completions')
+    expect(JSON.parse(fetch.mock.calls[0][1].body).model).toBe('some-model')
   })
 
-  it('maps a refusal and an unparseable response to errors, not crashes', async () => {
-    expect((await handleParseRule({ text: 'abc' }, {}, { client: fakeClient({ stop_reason: 'refusal', parsed_output: null }) })).status).toBe(422)
-    expect((await handleParseRule({ text: 'abc' }, {}, { client: fakeClient({ stop_reason: 'end_turn', parsed_output: null }) })).status).toBe(502)
-    const throwing = { beta: { messages: { parse: vi.fn().mockRejectedValue(new SyntaxError('bad json')) } } }
-    expect((await handleParseRule({ text: 'abc' }, {}, { client: throwing })).body.error).toBe('llm_bad_output')
+  it('maps quota, key and server errors to readable messages', async () => {
+    const spy = quiet()
+    expect((await handleParseRule({ text: 'abc' }, env, { fetch: reply(429, [{ error: { message: 'quota' } }]) })).body.error).toBe('llm_rate_limited')
+    expect((await handleParseRule({ text: 'abc' }, env, { fetch: reply(400, [{ error: { message: 'Please pass a valid API key' } }]) })).body.error).toBe('llm_auth')
+    expect((await handleParseRule({ text: 'abc' }, env, { fetch: reply(500, {}) })).body.error).toBe('llm_error')
+    spy.mockRestore()
+  })
+
+  it('handles network failures and timeouts', async () => {
+    const spy = quiet()
+    const down = vi.fn().mockRejectedValue(new TypeError('fetch failed'))
+    expect((await handleParseRule({ text: 'abc' }, env, { fetch: down })).status).toBe(502)
+    const slow = vi.fn().mockRejectedValue(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))
+    expect((await handleParseRule({ text: 'abc' }, env, { fetch: slow })).body.error).toBe('llm_timeout')
+    spy.mockRestore()
+  })
+
+  it('rejects truncated, filtered, non-JSON or off-schema replies instead of crashing', async () => {
+    const out = (fetch) => handleParseRule({ text: 'abc' }, env, { fetch }).then((r) => r.body.error)
+    expect(await out(completion(flipkart, { finish_reason: 'length' }))).toBe('llm_bad_output')
+    expect(await out(completion(flipkart, { finish_reason: 'content_filter' }))).toBe('llm_refused')
+    expect(await out(completion('not json at all'))).toBe('llm_bad_output')
+    expect(await out(completion({ status: 'ok', rule: { scope: 'category' } }))).toBe('llm_bad_output')
   })
 })

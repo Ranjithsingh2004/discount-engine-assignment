@@ -1,11 +1,11 @@
 /**
- * Live check of the natural-language rule parser against Claude.
+ * Live check of the natural-language rule parser against the real LLM (Gemini by default).
  * Sends each phrasing through the real server handler and the browser-side
  * validator, then compares the outcome with what we expect.
  *
- *   npm run eval:rules        (reads ANTHROPIC_API_KEY from .env or the environment)
+ *   npm run eval:rules        (reads GEMINI_API_KEY from .env or the environment)
  *
- * Costs a few cents per run.
+ * Uses 11 requests of the free-tier quota per run.
  */
 
 import { readFileSync, existsSync } from 'node:fs'
@@ -40,8 +40,8 @@ const CASES = [
   ['A discount on Noon', 'clarify'],
 ]
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error('Set ANTHROPIC_API_KEY (in .env or the environment) to run the live eval.')
+if (!process.env.GEMINI_API_KEY && !process.env.LLM_API_KEY) {
+  console.error('Set GEMINI_API_KEY (in .env or the environment) to run the live eval.')
   process.exit(1)
 }
 

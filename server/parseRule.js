@@ -4,21 +4,23 @@
  * Runs in the Vercel function (api/parse-rule.js) and in the Vite dev/preview
  * server (vite.config.js), so the API key never reaches the browser.
  *
- * It asks Claude to translate one sentence into a structured candidate rule
- * using structured outputs (the response is constrained to RuleParseSchema).
- * The candidate is NOT trusted: the browser validates it again with the same
- * normalizeRule() every other input goes through, then shows it to the user
- * for confirmation before anything reaches the engine.
+ * It asks an LLM (default: Google Gemini 3.5 Flash-Lite, free tier) to turn one
+ * sentence into a candidate rule, with the reply constrained to a JSON schema
+ * (structured output). The call uses the OpenAI-compatible chat completions
+ * format, so the provider can be swapped with environment variables only.
+ *
+ * The candidate is NOT trusted: it is checked against the schema here, then
+ * the browser validates it again with the same normalizeRule() every other
+ * input goes through, and the user confirms it before it reaches the engine.
  */
 
-import Anthropic from '@anthropic-ai/sdk'
-import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod'
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
 import { z } from 'zod'
 
-export const DEFAULT_MODEL = 'claude-opus-5-5'
+export const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai'
+export const DEFAULT_MODEL = 'gemini-3.5-flash-lite'
 const MAX_TEXT_LENGTH = 300
 const MAX_NAMES = 50
+const TIMEOUT_MS = 20_000
 
 export const RuleParseSchema = z.object({
   status: z.enum(['ok', 'needs_clarification', 'unsupported']),
@@ -36,6 +38,8 @@ export const RuleParseSchema = z.object({
   assumptions: z.array(z.string()),
   message: z.string(),
 })
+
+const { $schema, ...RULE_PARSE_JSON_SCHEMA } = z.toJSONSchema(RuleParseSchema)
 
 export const SYSTEM_PROMPT = `You translate a merchant's plain-English description of ONE discount rule into a structured rule for a shopping-cart pricing engine. You translate; you never invent numbers.
 
@@ -72,12 +76,31 @@ export function buildUserMessage(text, brands, platforms) {
   ].join('\n')
 }
 
+/** Which provider to call. GEMINI_API_KEY is the default; LLM_* switch to any OpenAI-compatible endpoint. */
+export function llmConfig(env) {
+  return {
+    apiKey: env.LLM_API_KEY || env.GEMINI_API_KEY || '',
+    baseUrl: (env.LLM_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    model: env.LLM_MODEL || DEFAULT_MODEL,
+  }
+}
+
 const fail = (status, error, message) => ({ status, body: { error, message } })
+
+async function readErrorMessage(response) {
+  try {
+    const body = await response.json()
+    const err = Array.isArray(body) ? body[0]?.error : body?.error
+    return String(err?.message ?? '')
+  } catch {
+    return ''
+  }
+}
 
 /**
  * @param {unknown} payload  request body: { text, brands?, platforms? }
  * @param {Record<string,string|undefined>} env  process.env or Vite's loadEnv()
- * @param {{ client?: Anthropic }} [deps]  injectable for tests
+ * @param {{ fetch?: typeof fetch }} [deps]  injectable for tests
  * @returns {Promise<{ status: number, body: object }>}
  */
 export async function handleParseRule(payload, env, deps = {}) {
@@ -87,66 +110,72 @@ export async function handleParseRule(payload, env, deps = {}) {
     return fail(400, 'input_too_long', `Keep the description under ${MAX_TEXT_LENGTH} characters: one rule per sentence.`)
   }
 
-  if (!deps.client && !env.ANTHROPIC_API_KEY) {
-    return fail(503, 'llm_not_configured', 'The AI rule parser is not configured on this deployment (ANTHROPIC_API_KEY is missing).')
+  const { apiKey, baseUrl, model } = llmConfig(env)
+  if (!apiKey) {
+    return fail(503, 'llm_not_configured', 'The AI rule parser is not configured on this deployment (GEMINI_API_KEY is missing).')
   }
 
-  const client = deps.client ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: 25_000, maxRetries: 1 })
-  const model = env.ANTHROPIC_MODEL || DEFAULT_MODEL
-
-  const request = {
-    model,
-    max_tokens: 16000,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserMessage(text, cleanNames(payload.brands), cleanNames(payload.platforms)) }],
-  }
-
+  const fetchImpl = deps.fetch ?? fetch
   let response
   try {
-    try {
-      response = await client.beta.messages.parse({
-        ...request,
-        // Re-run on Anthropic's recommended fallback model if a safety classifier declines.
-        betas: ['server-side-fallback-2026-07-01'],
-        fallbacks: 'default',
-        output_config: {
-          effort: 'low', // short extraction task; low effort keeps latency down
-          format: betaZodOutputFormat(RuleParseSchema),
+    response = await fetchImpl(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: buildUserMessage(text, cleanNames(payload.brands), cleanNames(payload.platforms)) },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: 'rule_parse', strict: true, schema: RULE_PARSE_JSON_SCHEMA },
         },
-      })
-    } catch (error) {
-      if (!(error instanceof Anthropic.BadRequestError)) throw error
-      // An account or model that rejects the fallback beta should still get a parse:
-      // retry once on the stable endpoint with the same schema.
-      console.warn(`[parse-rule] beta request rejected (${error.message}); retrying without fallbacks`)
-      response = await client.messages.parse({
-        ...request,
-        output_config: { effort: 'low', format: zodOutputFormat(RuleParseSchema) },
-      })
-    }
+      }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    })
   } catch (error) {
-    console.error('[parse-rule] model call failed:', error?.status ?? '', error?.message)
-    if (error instanceof Anthropic.AuthenticationError) {
-      return fail(502, 'llm_auth', 'The AI service rejected this deployment’s API key.')
-    }
-    if (error instanceof Anthropic.RateLimitError) {
-      return fail(429, 'llm_rate_limited', 'The AI service is busy right now. Try again in a few seconds.')
-    }
-    if (error instanceof Anthropic.APIConnectionTimeoutError) {
-      return fail(504, 'llm_timeout', 'The AI service took too long to answer. Try again.')
-    }
-    if (error instanceof Anthropic.APIError) {
-      return fail(502, 'llm_error', `The AI service returned an error${error.status ? ` (${error.status})` : ''}. Try again.`)
-    }
-    return fail(502, 'llm_bad_output', 'The AI returned a response that could not be read as a rule. Try rephrasing.')
+    if (error?.name === 'TimeoutError') return fail(504, 'llm_timeout', 'The AI service took too long to answer. Try again.')
+    console.error('[parse-rule] could not reach the AI service:', error?.message)
+    return fail(502, 'llm_unreachable', 'Could not reach the AI service. Try again in a moment.')
   }
 
-  if (response.stop_reason === 'refusal') {
+  if (!response.ok) {
+    const detail = await readErrorMessage(response)
+    console.error(`[parse-rule] AI service returned ${response.status}: ${detail}`)
+    if (response.status === 429) {
+      return fail(429, 'llm_rate_limited', 'The free AI quota is used up for the moment. Wait a minute and try again.')
+    }
+    if (response.status === 401 || response.status === 403 || /api key/i.test(detail)) {
+      return fail(502, 'llm_auth', 'The AI service rejected this deployment’s API key.')
+    }
+    return fail(502, 'llm_error', `The AI service returned an error (${response.status}). Try again.`)
+  }
+
+  let body
+  try {
+    body = await response.json()
+  } catch {
+    return fail(502, 'llm_bad_output', 'The AI returned a response that could not be read. Try again.')
+  }
+
+  const choice = body?.choices?.[0]
+  if (choice?.finish_reason === 'content_filter') {
     return fail(422, 'llm_refused', 'The AI declined to process this text. Try describing the rule differently.')
   }
-  if (response.stop_reason === 'max_tokens' || !response.parsed_output) {
+  if (choice?.finish_reason === 'length') {
     return fail(502, 'llm_bad_output', 'The AI returned an incomplete response. Try again.')
   }
 
-  return { status: 200, body: { result: response.parsed_output, model: response.model } }
+  let parsed
+  try {
+    parsed = RuleParseSchema.safeParse(JSON.parse(choice?.message?.content ?? ''))
+  } catch {
+    parsed = { success: false }
+  }
+  if (!parsed.success) {
+    return fail(502, 'llm_bad_output', 'The AI returned a response that does not match the rule format. Try rephrasing.')
+  }
+
+  return { status: 200, body: { result: parsed.data, model: body.model || model } }
 }

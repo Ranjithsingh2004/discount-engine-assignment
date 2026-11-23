@@ -1,6 +1,6 @@
 # Opptra Discount Engine
 
-A customer-facing cart pricing engine: final price per item, a plain-language reason for every price, a cart-level offer, natural-language rule input (Claude) and PDF cart upload.
+A customer-facing cart pricing engine: final price per item, a plain-language reason for every price, a cart-level offer, natural-language rule input (Gemini) and PDF cart upload.
 
 **Live demo:** _LIVE_URL_ — click **Load sample data** to see the expected results instantly.
 
@@ -10,7 +10,7 @@ A customer-facing cart pricing engine: final price per item, a plain-language re
 
 ```bash
 npm install
-cp .env.example .env      # then paste your ANTHROPIC_API_KEY (only needed for plain-English rules)
+cp .env.example .env      # then paste your GEMINI_API_KEY (free, only needed for plain-English rules)
 npm run dev               # http://localhost:5173
 ```
 
@@ -18,15 +18,15 @@ npm run dev               # http://localhost:5173
 
 | Command | What it does |
 |---|---|
-| `npm test` | 76 unit tests: engine, validation, CSV, PDF parsing, LLM output handling |
-| `npm run eval:rules` | Live check of the rule parser against Claude (11 phrasings, needs a key, costs cents) |
+| `npm test` | 78 unit tests: engine, validation, CSV, PDF parsing, LLM output handling |
+| `npm run eval:rules` | Live check of the rule parser against Gemini: 11 phrasings, currently 11/11 (uses 11 free-tier requests) |
 | `npm run samples` | Regenerates the sample PDFs in `sample-data/` |
 | `npm run build` | Production build to `dist/` |
 
 ## Deploying (Vercel)
 
 1. Import this repo in Vercel (framework preset: Vite, already set in `vercel.json`).
-2. Add the environment variable `ANTHROPIC_API_KEY`.
+2. Add the environment variable `GEMINI_API_KEY` (free key from [Google AI Studio](https://aistudio.google.com/apikey)).
 3. Deploy. The static app is served from `dist/`, and `api/parse-rule.js` becomes a serverless function.
 
 ---
@@ -37,7 +37,7 @@ npm run dev               # http://localhost:5173
 |---|---|---|
 | **Foundation** | Base engine verified against the expected table: Rs.1,104 / 629 / 509 / 2,499 / 382 / 809, cart total Rs.5,932, final Rs.5,339 | *Load sample data* |
 | **Task 1: Cart offer** | Cart-scope rules with a minimum cart value, evaluated after item offers. A separate offer row ("Cart offer: 10% off — Rs.593 saved") appears only when triggered. | Results panel |
-| **Task 2: Plain-English rules** | Text goes to Claude (structured output), then validation, then a confirmation card, then the rule list. The engine re-runs immediately. | "Add a rule in plain English" |
+| **Task 2: Plain-English rules** | Text goes to Gemini (JSON-schema output), then validation, then a confirmation card, then the rule list. The engine re-runs immediately. | "Add a rule in plain English" |
 | **Task 3: PDF cart** | Upload a PDF; the table is extracted, rows are validated and the cart is replaced. The engine re-runs automatically. | Cart upload accepts `.csv` and `.pdf`; sample PDFs are linked under it |
 
 ### Customer-facing output
@@ -59,7 +59,7 @@ The reasoning is generated from what the engine actually applied, so it stays ac
 
 ```
   rules.csv ─┐                                    ┌─ cart.csv
-  plain English ─► Claude ─┐                      ├─ cart.pdf ─► pdf.js ─► column parser
+  plain English ─► Gemini ─┐                      ├─ cart.pdf ─► pdf.js ─► column parser
                            ▼                      ▼
                  ┌──────────────────────────────────────────┐
                  │ engine/models.js  normalizeRule()        │  ← the ONLY way in:
@@ -87,7 +87,7 @@ src/
     naturalLanguage.js  calls /api/parse-rule, validates the LLM output, adds warnings
   components/           FileUploader, NaturalLanguageRule, CheckoutSummary, DataTable, …
   App.jsx               session state + wiring
-server/parseRule.js     Claude call (structured outputs), shared by Vercel and the Vite dev server
+server/parseRule.js     LLM call (Gemini, JSON-schema output), shared by Vercel and the Vite dev server
 api/parse-rule.js       Vercel function (thin HTTP wrapper)
 scripts/                sample PDF builder, live parser eval
 tests/                  vitest suites
@@ -119,7 +119,7 @@ tests/                  vitest suites
 - An import that yields zero valid rows **never wipes out** the current rules or cart.
 
 ### Plain-English rules (Task 2)
-- **The LLM output is untrusted input.** Claude returns a schema-constrained object (structured outputs). The browser then runs it through the same `normalizeRule()` as a CSV row, so a 150% discount or a brand rule with no brand is shown as "failed validation, nothing added", with the reason.
+- **The LLM output is untrusted input.** Gemini is forced to answer in a JSON schema, and the server checks the reply against that schema again. The browser then runs it through the same `normalizeRule()` as a CSV row, so a 150% discount or a brand rule with no brand is shown as "failed validation, nothing added", with the reason.
 - **Three non-happy outcomes are first-class, not crashes**: `needs_clarification` ("Give a discount for big orders" asks for the amount and threshold), `unsupported` (buy-X-get-Y, date-based or capped offers), and transport errors (missing key, timeout, rate limit, refusal), each with a message and a retry.
 - **The confirmation step shows what the engine will do, not what the LLM said**:
   - the parsed fields;
@@ -142,7 +142,17 @@ tests/                  vitest suites
 - pdf.js loads lazily (about 120 KB gzipped) only when a PDF is uploaded.
 
 ### Why there is a (tiny) server
-The brief allows everything client-side. But an Anthropic API key in a static bundle is readable by anyone who opens DevTools. So the one LLM call goes through a serverless function (`api/parse-rule.js`), with input-length limits and a 25-second timeout. The same handler runs inside `npm run dev`, so local setup stays at three steps. PDF parsing stays in the browser.
+The brief allows everything client-side. But an API key in a static bundle is readable by anyone who opens DevTools. So the one LLM call goes through a serverless function (`api/parse-rule.js`), with input-length limits and a 20-second timeout. The same handler runs inside `npm run dev`, so local setup stays at three steps. PDF parsing stays in the browser.
+
+### Which LLM, and why
+- **Gemini 3.5 Flash-Lite on Google's free tier.** The job is small (one sentence into six fields), so model size matters less than three practical things:
+  - it is free without a credit card;
+  - it enforces a JSON schema on the reply;
+  - it answers in about 1–2 seconds, with a higher free daily quota than the larger Flash models.
+
+  The live eval passes 11/11, including typos ("natura kasa") and shorthand ("above 3k").
+- **No SDK; the OpenAI-compatible endpoint with plain `fetch`.** Switching providers (another Gemini model, or any OpenAI-compatible service with JSON-schema output) is a matter of `LLM_MODEL`, `LLM_BASE_URL` and `LLM_API_KEY`, with no code change.
+- **Trade-off**: Google may use free-tier prompts to improve its products. That is acceptable for a demo that only ever sees sample rule text; a production deployment would use a paid tier. When the free quota runs out, the user sees "The free AI quota is used up for the moment", not a crash.
 
 ---
 
@@ -159,6 +169,7 @@ The brief allows everything client-side. But an Anthropic API key in a static bu
 ## Known limitations
 - PDF cells that wrap onto two lines, or columns separated by a single space in a plain-text printout, can't be split reliably. They are reported as malformed rows rather than guessed.
 - The public `/api/parse-rule` endpoint has input-size limits but no per-IP rate limiting (serverless instances share no memory). In production I'd put it behind the platform's rate limiting or auth.
+- The free Gemini tier has per-minute and per-day request limits. That is plenty for a demo, but heavy use would need a paid key.
 - State is in memory for the session, as the brief asks.
 
 ## File formats
